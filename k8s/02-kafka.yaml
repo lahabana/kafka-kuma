@@ -1,0 +1,114 @@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cluster1
+  namespace: kafka
+spec:
+  ports:
+    - port: 9092
+      name: kafka
+      appProtocol: tcp
+    - port: 9093
+      name: kafka-controller
+      appProtocol: tcp
+  selector:
+    app: cluster1
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: cluster1
+  namespace: kafka
+spec:
+  selector:
+    matchLabels:
+      app: cluster1
+  serviceName: "cluster1"
+  replicas: 3
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: Parallel
+  template:
+    metadata:
+      labels:
+        app: cluster1
+      annotations:
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: broker
+          image: moltch/kafka:latest
+          env:
+            - name: CLUSTER_ID
+              value: "kuma-cluster"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KAFKA_LOG4J_OPTS
+              value: -Dlog4j.configuration=file:/var/kafka/config/log4j.properties
+            - name: JMX_PORT
+              value: "5555"
+          ports:
+            - name: inside
+              containerPort: 9092
+            - name: controller
+              containerPort: 9093
+            - name: jmx
+              containerPort: 5555
+          command:
+            - bash
+            - -c
+            - |
+              export NODE_ID=`echo ${POD_NAME} | awk -F '-' '{ print $NF }'`
+              export CLUSTER_ID=`echo ${POD_NAME} | sed 's/^\(.*\)-'${NODE_ID}'\$/\1/'`
+              if [[ ${NODE_ID} -lt 3 ]]; then
+                export ROLE=broker,controller
+              else
+                export ROLE=broker
+              fi
+              cp /etc/kafka/server.properties /tmp/kafka-server.properties
+              echo "
+                node.id=${NODE_ID}
+                advertised.listeners=PLAINTEXT://${POD_NAME}.${CLUSTER_ID}.kafka.mesh:9092
+                process.roles=${ROLE}
+                log.dirs=/var/lib/kafka/data/${NODE_ID}
+                controller.quorum.voters=0@${CLUSTER_ID}-0.${CLUSTER_ID}.kafka.mesh:9093,1@${CLUSTER_ID}-1.${CLUSTER_ID}.kafka.mesh:9093,2@${CLUSTER_ID}-2.${CLUSTER_ID}.kafka.mesh:9093
+              " >> /tmp/kafka-server.properties
+
+              /var/kafka/bin/kafka-storage.sh format -t `cat /etc/kafka/uuid` -c /tmp/kafka-server.properties
+              /var/kafka/bin/kafka-server-start.sh /tmp/kafka-server.properties \
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-ce", "kill -s TERM 1; while $(kill -0 1 2>/dev/null); do sleep 1; done"]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 200Mi
+          readinessProbe:
+            tcpSocket:
+              port: 9092
+            timeoutSeconds: 1
+          volumeMounts:
+            - name: config
+              mountPath: /etc/kafka
+            - name: data
+              mountPath: /var/lib/kafka/data
+      volumes:
+        - name: config
+          configMap:
+            name: cluster1-broker-config
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ "ReadWriteOnce" ]
+        resources:
+          requests:
+            storage: 10Gi

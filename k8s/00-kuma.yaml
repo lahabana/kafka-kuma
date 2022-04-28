@@ -1,0 +1,73 @@
+apiVersion: kuma.io/v1alpha1
+kind: Mesh
+metadata:
+  name: kafka
+spec:
+  metrics:
+    backends:
+      - conf:
+          skipMTLS: true
+          path: /metrics
+          port: 5670
+          tags:
+            kuma.io/service: dataplane-metrics
+        name: prometheus-1
+        type: prometheus
+    enabledBackend: prometheus-1
+  mtls:
+    backends:
+      - name: ca-1
+        type: builtin
+    enabledBackend: ca-1
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kafka
+  annotations:
+    kuma.io/mesh: kafka
+  labels:
+    kuma.io/sidecar-injection: enabled
+---
+apiVersion: kuma.io/v1alpha1
+kind: VirtualOutbound
+mesh: kafka
+metadata:
+  name: kafka-per-broker
+spec:
+  selectors:
+    - match:
+        k8s.kuma.io/namespace: kafka
+        kuma.io/service: "*"
+        statefulset.kubernetes.io/pod-name: "*"
+  conf:
+    host: "{{.pod}}.{{.app}}.kafka.mesh"
+    port: "{{.port}}"
+    parameters:
+      - name: "app"
+      - name: svc
+        tagKey: "kuma.io/service"
+      - name: pod
+        tagKey: "statefulset.kubernetes.io/pod-name"
+      - name: port
+        tagKey: "k8s.kuma.io/service-port"
+---
+apiVersion: kuma.io/v1alpha1
+kind: VirtualOutbound
+mesh: kafka
+metadata:
+  name: kafka-bootstrap
+spec:
+  selectors:
+    - match:
+        k8s.kuma.io/namespace: kafka
+        kuma.io/service: "*"
+        k8s.kuma.io/service-port: "9092"
+        statefulset.kubernetes.io/pod-name: "*"
+  conf:
+    host: "{{.app}}.kafka.mesh"
+    port: "9092"
+    parameters:
+      - name: app
+      - name: svc
+        tagKey: "kuma.io/service"
